@@ -148,6 +148,18 @@ const SAC = () => {
     }, [processing, generating]);
 
     // Utility functions
+    const handleGitHubProcess = (processing, result = null) => {
+        setProcessing(processing);
+        setGenerating(processing);
+
+        if (result) {
+            setContent(result.content);
+            setFileCount(result.fileCount);
+            setTotalSize(result.totalSize);
+            setCurrentTokens(result.tokenCount);
+        }
+    };
+
     const shouldSkipEntry = (path: string): boolean => {
         const normalizedPath = path.toLowerCase();
 
@@ -388,6 +400,286 @@ const SAC = () => {
             setGenerating(false);
             setProcessing(false);
         }
+    };
+
+    const GitHubInput = ({ onProcess, processing, settings }) => {
+        const [url, setUrl] = useState('');
+        const [error, setError] = useState('');
+        const [progress, setProgress] = useState({ processed: 0, total: 0 });
+        const abortControllerRef = useRef(null);
+
+        const validateGitHubUrl = (url) => {
+            const githubRegex = /^https:\/\/github\.com\/[\w-]+\/[\w.-]+(?:\/tree\/[^/]+(?:\/[\w.-]+)*)?$/;
+            return githubRegex.test(url);
+        };
+
+        const extractRepoInfo = (url) => {
+            const match = url.match(/github\.com\/([\w-]+)\/([\w.-]+)(?:\/tree\/([^/]+)(?:\/(.+))?)?/);
+            return match ? {
+                owner: match[1],
+                repo: match[2],
+                branch: match[3] || null,
+                path: match[4] || ''
+            } : null;
+        };
+
+        const fetchRepoContents = async (owner, repo, branch = null, basePath = '') => {
+            try {
+                // Initialize abort controller
+                abortControllerRef.current = new AbortController();
+                const { signal } = abortControllerRef.current;
+
+                // Get repository metadata
+                const repoResponse = await fetch(
+                    `https://api.github.com/repos/${owner}/${repo}`,
+                    {
+                        headers: {
+                            'Accept': 'application/vnd.github.v3+json'
+                        },
+                        signal
+                    }
+                );
+
+                if (!repoResponse.ok) {
+                    throw new Error(repoResponse.status === 404 ? 'Repository not found' : 'Failed to fetch repository');
+                }
+
+                const repoData = await repoResponse.json();
+                const targetBranch = branch || repoData.default_branch;
+
+                // Fetch the tree
+                const treeResponse = await fetch(
+                    `https://api.github.com/repos/${owner}/${repo}/git/trees/${targetBranch}?recursive=1`,
+                    {
+                        headers: {
+                            'Accept': 'application/vnd.github.v3+json'
+                        },
+                        signal
+                    }
+                );
+
+                if (!treeResponse.ok) {
+                    throw new Error('Failed to fetch repository contents');
+                }
+
+                const treeData = await treeResponse.json();
+
+                // Filter files based on settings
+                const files = treeData.tree
+                    .filter(item => item.type === 'blob')
+                    .filter(item => !basePath || item.path.startsWith(basePath))
+                    .filter(item => {
+                        // Check file extension
+                        const extension = '.' + item.path.split('.').pop().toLowerCase();
+                        const allowedTypes = settings.allowedFormats
+                            .split('\n')
+                            .map(type => type.trim().toLowerCase())
+                            .filter(Boolean);
+
+                        if (allowedTypes.length === 0) return true;
+                        return allowedTypes.includes(extension);
+                    })
+                    .filter(item => {
+                        // Check exclude patterns
+                        const allPatterns = [
+                            ...DEFAULT_SKIP_PATTERNS,
+                            ...settings.excludePatterns
+                        ].map(pattern => pattern.toLowerCase().trim())
+                            .filter(Boolean);
+
+                        return !allPatterns.some(pattern => {
+                            const regexPattern = pattern
+                                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                                .replace(/\*/g, '.*')
+                                .replace(/\?/g, '.');
+                            return new RegExp(regexPattern).test(item.path.toLowerCase());
+                        });
+                    });
+
+                setProgress({ processed: 0, total: files.length });
+
+                let combinedContent = '';
+                let processedFiles = 0;
+                let totalSize = 0;
+                let currentTokens = 0;
+
+                for (const file of files) {
+                    if (signal.aborted) {
+                        throw new Error('Operation cancelled');
+                    }
+
+                    try {
+                        const contentResponse = await fetch(
+                            `https://api.github.com/repos/${owner}/${repo}/contents/${file.path}?ref=${targetBranch}`,
+                            {
+                                headers: {
+                                    'Accept': 'application/vnd.github.v3+json'
+                                },
+                                signal
+                            }
+                        );
+
+                        if (!contentResponse.ok) continue;
+
+                        const contentData = await contentResponse.json();
+                        let content = atob(contentData.content);
+
+                        // Apply processing based on settings
+                        if (settings.removeComments) {
+                            content = content
+                                .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1')
+                                .replace(/^\s*#.*$/gm, '')
+                                .replace(/^\s*--.*$/gm, '')
+                                .replace(/^\s*\n/gm, '')
+                                .trim();
+                        }
+
+                        if (settings.minifyCode) {
+                            content = content
+                                .replace(/\s+/g, ' ')
+                                .replace(/\n/g, '')
+                                .trim();
+                        }
+
+                        // Check token limit
+                        const contentTokens = Math.ceil(content.length / 4);
+                        if (settings.tokenLimit > 0 && currentTokens + contentTokens > settings.tokenLimit) {
+                            console.warn(`Token limit (${settings.tokenLimit}) reached`);
+                            break;
+                        }
+
+                        combinedContent += `\n\n// File: ${file.path}\n${content}`;
+                        processedFiles++;
+                        totalSize += content.length;
+                        currentTokens += contentTokens;
+
+                        setProgress({ processed: processedFiles, total: files.length });
+
+                        // Add small delay to avoid rate limits
+                        await new Promise(resolve => setTimeout(resolve, 50));
+
+                    } catch (error) {
+                        if (error.message === 'Operation cancelled') throw error;
+                        console.warn(`Error processing ${file.path}:`, error);
+                    }
+                }
+
+                return {
+                    content: combinedContent.trim(),
+                    fileCount: processedFiles,
+                    totalSize,
+                    tokenCount: currentTokens
+                };
+
+            } catch (error) {
+                if (signal?.aborted) {
+                    throw new Error('Operation cancelled by user');
+                }
+                throw error;
+            } finally {
+                abortControllerRef.current = null;
+            }
+        };
+
+        const handleSubmit = async (e) => {
+            e.preventDefault();
+            setError('');
+            setProgress({ processed: 0, total: 0 });
+
+            if (!validateGitHubUrl(url)) {
+                setError('Please enter a valid GitHub repository URL');
+                return;
+            }
+
+            const repoInfo = extractRepoInfo(url);
+            if (!repoInfo) {
+                setError('Invalid GitHub repository URL format');
+                return;
+            }
+
+            try {
+                onProcess(true);
+                const result = await fetchRepoContents(
+                    repoInfo.owner,
+                    repoInfo.repo,
+                    repoInfo.branch,
+                    repoInfo.path
+                );
+                onProcess(false, result);
+                setUrl('');
+            } catch (error) {
+                if (error.message !== 'Operation cancelled by user') {
+                    setError(error.message);
+                }
+                onProcess(false);
+            }
+        };
+
+        const handleCancel = () => {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+                abortControllerRef.current = null;
+                onProcess(false);
+                setProgress({ processed: 0, total: 0 });
+            }
+        };
+
+        return (
+            <div className="mb-8">
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div className="relative">
+                        <div className="flex gap-2">
+                            <div className="relative flex-1">
+                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <Github className="h-5 w-5 text-gray-400" />
+                                </div>
+                                <input
+                                    type="text"
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    disabled={processing}
+                                    className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="Enter GitHub repository URL or directory path"
+                                />
+                            </div>
+                            {processing ? (
+                                <button
+                                    type="button"
+                                    onClick={handleCancel}
+                                    className="px-6 py-3 rounded-xl font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
+                                >
+                                    <div className="flex items-center gap-2">
+                                        <X className="w-5 h-5" />
+                                        <span>Stop</span>
+                                    </div>
+                                </button>
+                            ) : (
+                                <button
+                                    type="submit"
+                                    disabled={!url}
+                                    className={`px-6 py-3 rounded-xl font-medium transition-colors
+                                        ${!url ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                            : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                >
+                                    Process
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    {error && (
+                        <div className="text-red-600 text-sm mt-2">
+                            {error}
+                        </div>
+                    )}
+                    {processing && progress.total > 0 && (
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <Loader className="w-4 h-4 animate-spin" />
+                            <span>Processing files: {progress.processed}/{progress.total}</span>
+                        </div>
+                    )}
+                </form>
+            </div>
+        );
     };
 
     // Update the token-aware content display
@@ -757,6 +1049,15 @@ const SAC = () => {
                             </div>
                         </div>
 
+
+                        <div className="mb-8">
+                            <GitHubInput
+                                onProcess={handleGitHubProcess}
+                                processing={processing || generating}
+                                settings={settings}
+                            />
+                        </div>
+
                         <button
                             onClick={() => setShowAdvanced(!showAdvanced)}
                             className="w-full flex items-center justify-center gap-2 text-gray-600 hover:text-gray-900 p-4 bg-white rounded-xl border border-gray-200 shadow-lg hover:bg-gray-50 transition-colors"
@@ -798,6 +1099,7 @@ const SAC = () => {
                         </div>
                     </>
                 )}
+
             </main>
 
             <footer className="mt-24 py-12 bg-gray-50 border-t border-gray-200">
