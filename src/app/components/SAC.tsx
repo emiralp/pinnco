@@ -148,13 +148,12 @@ const SAC = () => {
     }, [processing, generating]);
 
     // Utility functions
-    const handleGitHubProcess = (processing, result = null) => {
+    const handleGitHubProcess = (processing, result = {content:"", fileCount: 0, totalSize: 0, tokenCount: 0}) => {
         setProcessing(processing);
         setGenerating(processing);
 
-        if (result && result != null && result.content) {
-            const rsy = result.content||"";
-            setContent(rsy);
+        if (result && result.content != "") {
+            setContent(result.content);
             setFileCount(result.fileCount);
             setTotalSize(result.totalSize);
             setCurrentTokens(result.tokenCount);
