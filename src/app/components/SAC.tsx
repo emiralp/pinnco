@@ -152,8 +152,9 @@ const SAC = () => {
         setProcessing(processing);
         setGenerating(processing);
 
-        if (result) {
-            setContent(result.content);
+        if (result && result != null && result.content) {
+            const rsy = result.content||"";
+            setContent(rsy);
             setFileCount(result.fileCount);
             setTotalSize(result.totalSize);
             setCurrentTokens(result.tokenCount);
