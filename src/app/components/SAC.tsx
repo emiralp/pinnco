@@ -2,6 +2,12 @@
 
 import { BotIcon, Check, Copy, FileText, FolderOpen, Github, Shield, Terminal, Trash2, Zap } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
+
+// Type definitions
+interface FileWithPath extends File {
+    path?: string;
+}
+
 const SAC = () => {
     // Core state
     const [content, setContent] = useState('');
@@ -12,7 +18,7 @@ const SAC = () => {
     const [processing, setProcessing] = useState(false);
 
     // Refs for cleanup
-    const copyTimeoutRef = useRef(null);
+    const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     // File processing configuration
     const ACCEPTED_TYPES = [
@@ -38,35 +44,37 @@ const SAC = () => {
     }, []);
 
     // File processing utilities
-    const shouldSkipEntry = (name) => {
+    const shouldSkipEntry = (name: string): boolean => {
         return SKIP_PATTERNS.some(pattern => name.toLowerCase().includes(pattern.toLowerCase()));
     };
 
-    const processFileEntry = async (entry, path = '') => {
+    const processFileEntry = async (entry: FileSystemEntry, path = ''): Promise<string> => {
         if (shouldSkipEntry(entry.name)) return '';
 
         if (entry.isFile) {
+            const fileEntry = entry as FileSystemFileEntry;
             try {
-                const file = await new Promise((resolve) => entry.file(resolve));
+                const file = await new Promise<FileWithPath>((resolve) => fileEntry.file(resolve));
                 if (file.size > MAX_FILE_SIZE) return '';
 
-                const extension = '.' + file.name.split('.').pop().toLowerCase();
-                if (!ACCEPTED_TYPES.includes(extension)) return '';
+                const extension = '.' + file.name.split('.').pop()?.toLowerCase();
+                if (!extension || !ACCEPTED_TYPES.includes(extension)) return '';
 
                 const content = await file.text();
                 setTotalSize(prev => prev + file.size);
                 return `\n\n// File: ${path ? `${path}/` : ''}${file.name}\n${content}`;
             } catch (error) {
-                console.error(`Error reading ${file.name}:`, error);
+                console.error(`Error reading ${entry.name}:`, error);
                 return '';
             }
         }
 
         if (entry.isDirectory) {
+            const dirEntry = entry as FileSystemDirectoryEntry;
             try {
-                const dirReader = entry.createReader();
-                const entries = await new Promise((resolve) => {
-                    const results = [];
+                const dirReader = dirEntry.createReader();
+                const entries = await new Promise<FileSystemEntry[]>((resolve) => {
+                    const results: FileSystemEntry[] = [];
                     function readEntries() {
                         dirReader.readEntries((entries) => {
                             if (entries.length) {
@@ -114,13 +122,14 @@ const SAC = () => {
             document.execCommand('copy');
             document.body.removeChild(textarea);
             setCopied(true);
+            console.error(err);
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
             copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
         }
     };
 
     // Drop handler
-    const handleDrop = async (e) => {
+    const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragging(false);
         setProcessing(true);
