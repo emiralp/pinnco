@@ -1,15 +1,89 @@
 "use client";
 
-import { ArrowUpRight, BoltIcon, BotIcon, Check, Copy, FileText, FolderOpen, Github, Heart, Loader, Shield, SparkleIcon, Sparkles, Terminal, Trash2, Zap } from 'lucide-react';
+import {
+    ArrowUpRight, BoltIcon, BotIcon, Check, Copy, FileText,
+    FolderOpen, Github, Heart, Loader, Shield, SparkleIcon,
+    Sparkles, Terminal, Trash2, Zap, Settings, Plus, Minus,
+    ChevronDown, ChevronUp
+} from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 
 // Type definitions
-interface FileWithPath extends File {
-    path?: string;
+interface AdvancedSettings {
+    tokenLimit: number;
+    excludePatterns: string[];
+    removeComments: boolean;
+    minifyCode: boolean;
+    allowedFormats: string;
 }
 
+// Constants
+const DEFAULT_ACCEPTED_TYPES = [
+    '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.html', '.css', '.scss',
+    '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.cpp', '.c', '.cs',
+    '.sql', '.json', '.yaml', '.toml', '.env', '.md', '.txt', '.csv'
+];
+const DEFAULT_SKIP_PATTERNS = [
+    'node_modules', 'vendor', 'dist', 'build', '.git',
+    '__pycache__', 'venv', '.env', 'coverage', 'tmp'
+];
+const STORAGE_KEY = 'sac_advanced_settings';
+const DEFAULT_SETTINGS: AdvancedSettings = {
+    tokenLimit: 1500,
+    excludePatterns: [],
+    removeComments: false,
+    minifyCode: false,
+    allowedFormats: DEFAULT_ACCEPTED_TYPES.join('\n')
+};
+
+// Settings management hook
+const useSettings = () => {
+    // Initialize settings from localStorage
+    const [settings, setSettings] = useState<AdvancedSettings>(() => {
+        if (typeof window === 'undefined') return DEFAULT_SETTINGS;
+
+        try {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (!saved) return DEFAULT_SETTINGS;
+
+            const parsed = JSON.parse(saved);
+
+            // Ensure all properties exist with proper types
+            return {
+                tokenLimit: Number(parsed.tokenLimit) || DEFAULT_SETTINGS.tokenLimit,
+                excludePatterns: Array.isArray(parsed.excludePatterns) ? parsed.excludePatterns : DEFAULT_SETTINGS.excludePatterns,
+                removeComments: Boolean(parsed.removeComments),
+                minifyCode: Boolean(parsed.minifyCode),
+                allowedFormats: typeof parsed.allowedFormats === 'string' ? parsed.allowedFormats : DEFAULT_SETTINGS.allowedFormats
+            };
+        } catch (error) {
+            console.error('Error loading settings:', error);
+            return DEFAULT_SETTINGS;
+        }
+    });
+
+    // Save settings to localStorage whenever they change
+    useEffect(() => {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        } catch (error) {
+            console.error('Error saving settings:', error);
+        }
+    }, [settings]);
+
+    // Update individual settings
+    const updateSettings = (updates: Partial<AdvancedSettings>) => {
+        setSettings(current => ({
+            ...current,
+            ...updates
+        }));
+    };
+
+    return { settings, updateSettings, setSettings };
+};
+
 const SAC = () => {
-    // Core state
+    // Core state management
     const [content, setContent] = useState('');
     const [isDragging, setIsDragging] = useState(false);
     const [fileCount, setFileCount] = useState(0);
@@ -17,256 +91,368 @@ const SAC = () => {
     const [totalSize, setTotalSize] = useState(0);
     const [processing, setProcessing] = useState(false);
     const [generating, setGenerating] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const { settings, updateSettings, setSettings } = useSettings();
 
-    // Refs for cleanup
+    // Advanced settings state
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [newPattern, setNewPattern] = useState('');
+    const [tokenLimit, setTokenLimit] = useState(settings.tokenLimit);
+    const [currentTokens, setCurrentTokens] = useState(0);
     const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    // File processing configuration
-    const ACCEPTED_TYPES = [
-        '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.html', '.css', '.scss',
-        '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.cpp', '.c', '.cs',
-        '.sql', '.json', '.yaml', '.toml', '.env', '.md', '.txt', '.csv'
-    ];
-
-    const SKIP_PATTERNS = [
-        'node_modules', 'vendor', 'dist', 'build', '.git',
-        '__pycache__', 'venv', '.env', 'coverage', 'tmp'
-    ];
-
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-
-    // Cleanup on unmount
+    // Cleanup effect
     useEffect(() => {
         return () => {
-            if (copyTimeoutRef.current) {
-                clearTimeout(copyTimeoutRef.current);
-            }
+            if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+            if (processingTimeoutRef.current) clearTimeout(processingTimeoutRef.current);
         };
     }, []);
 
-    // File processing utilities
-    const shouldSkipEntry = (name: string): boolean => {
-        return SKIP_PATTERNS.some(pattern => name.toLowerCase().includes(pattern.toLowerCase()));
+    // Sync tokenLimit with settings
+    useEffect(() => {
+        setTokenLimit(settings.tokenLimit);
+    }, [settings.tokenLimit]);
+
+    // Reset token count when content changes
+    useEffect(() => {
+        const count = estimateTokenCount(content);
+        setCurrentTokens(count);
+    }, [content]);
+
+    // Effect to save settings
+    useEffect(() => {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        } catch (error) {
+            console.error('Error saving settings:', error);
+        }
+    }, [settings]);
+
+    // Processing timeout effect
+    useEffect(() => {
+        if (processing || generating) {
+            processingTimeoutRef.current = setTimeout(() => {
+                setProcessing(false);
+                setGenerating(false);
+                setError('Processing timed out. Please try again with fewer files.');
+            }, 30000);
+
+            return () => {
+                if (processingTimeoutRef.current) {
+                    clearTimeout(processingTimeoutRef.current);
+                }
+            };
+        }
+    }, [processing, generating]);
+
+    // Utility functions
+    const shouldSkipEntry = (path: string): boolean => {
+        const normalizedPath = path.toLowerCase();
+
+        // Combine default and user patterns
+        const allPatterns = [
+            ...DEFAULT_SKIP_PATTERNS,
+            ...settings.excludePatterns
+        ].map(pattern => pattern.toLowerCase().trim())
+            .filter(Boolean);
+
+        return allPatterns.some(pattern => {
+            // Convert glob pattern to regex
+            const regexPattern = pattern
+                .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape regex special chars
+                .replace(/\*/g, '.*')                  // Convert * to .*
+                .replace(/\?/g, '.');                  // Convert ? to .
+
+            const regex = new RegExp(regexPattern);
+            return regex.test(normalizedPath);
+        });
+    };
+
+    const isAllowedFileType = (filename: string): boolean => {
+        const extension = '.' + filename.split('.').pop()?.toLowerCase();
+        if (!extension) return false;
+
+        const allowedTypes = settings.allowedFormats
+            .split('\n')
+            .map(type => type.trim().toLowerCase())
+            .filter(Boolean);
+
+        // If no allowed types are specified, accept all files
+        if (allowedTypes.length === 0) return true;
+
+        return allowedTypes.includes(extension);
+    };
+
+    const handleResetSettings = () => {
+        setSettings(DEFAULT_SETTINGS);
+        setTokenLimit(DEFAULT_SETTINGS.tokenLimit);
     };
 
     const processFileEntry = async (entry: FileSystemEntry, path = ''): Promise<string> => {
-        if (shouldSkipEntry(entry.name)) return '';
+        const entryPath = path ? `${path}/${entry.name}` : entry.name;
 
-        if (entry.isFile) {
-            const fileEntry = entry as FileSystemFileEntry;
-            try {
-                const file = await new Promise<FileWithPath>((resolve) => fileEntry.file(resolve));
-                if (file.size > MAX_FILE_SIZE) return '';
+        // Check if the entry should be skipped
+        if (shouldSkipEntry(entryPath)) {
+            console.log(`Skipping ${entryPath} due to exclude pattern match`);
+            return '';
+        }
 
-                const extension = '.' + file.name.split('.').pop()?.toLowerCase();
-                if (!extension || !ACCEPTED_TYPES.includes(extension)) return '';
+        try {
+            if (entry.isFile) {
+                const fileEntry = entry as FileSystemFileEntry;
+                const file = await new Promise<File>((resolve, reject) => {
+                    fileEntry.file(resolve, reject);
+                });
+
+                // Size check
+                if (file.size > 10 * 1024 * 1024) {
+                    console.warn(`Skipping ${file.name}: File too large (${(file.size / 1024 / 1024).toFixed(1)}MB)`);
+                    return '';
+                }
+
+                // Extension check
+                if (!isAllowedFileType(file.name)) {
+                    console.warn(`Skipping ${file.name}: File type not allowed`);
+                    return '';
+                }
 
                 const content = await file.text();
                 setTotalSize(prev => prev + file.size);
-                return `\n\n// File: ${path ? `${path}/` : ''}${file.name}\n${content}`;
-            } catch (error) {
-                console.error(`Error reading ${entry.name}:`, error);
-                return '';
-            }
-        }
 
-        if (entry.isDirectory) {
-            const dirEntry = entry as FileSystemDirectoryEntry;
-            try {
-                const dirReader = dirEntry.createReader();
-                const entries = await new Promise<FileSystemEntry[]>((resolve) => {
+                let processedContent = content;
+                if (settings.removeComments) {
+                    // Improved comment removal for different languages
+                    processedContent = processedContent
+                        .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1') // Remove C-style comments
+                        .replace(/^\s*#.*$/gm, '')                           // Remove shell/python style comments
+                        .replace(/^\s*--.*$/gm, '')                         // Remove SQL style comments
+                        .replace(/^\s*\n/gm, '')                           // Remove empty lines
+                        .trim();
+                }
+
+                if (settings.minifyCode) {
+                    processedContent = processedContent
+                        .replace(/\s+/g, ' ')
+                        .replace(/\n/g, '')
+                        .trim();
+                }
+
+                // Normalize path for display
+                const cleanPath = entryPath.replace(/^\/+/, '').replace(/\/+/g, '/');
+                return `\n\n// File: ${cleanPath}\n${processedContent}`;
+            }
+
+            if (entry.isDirectory) {
+                const dirEntry = entry as FileSystemDirectoryEntry;
+                const reader = dirEntry.createReader();
+
+                // Read all entries in the directory
+                const entries = await new Promise<FileSystemEntry[]>((resolve, reject) => {
                     const results: FileSystemEntry[] = [];
+
                     function readEntries() {
-                        dirReader.readEntries((entries) => {
-                            if (entries.length) {
-                                results.push(...entries);
-                                readEntries();
-                            } else {
-                                resolve(results);
-                            }
-                        });
+                        reader.readEntries(
+                            (entries) => {
+                                if (entries.length === 0) {
+                                    resolve(results);
+                                } else {
+                                    results.push(...entries);
+                                    readEntries(); // Continue reading
+                                }
+                            },
+                            reject
+                        );
                     }
+
                     readEntries();
                 });
 
-                let content = '';
+                // Process directory contents
+                let combinedContent = '';
                 for (const childEntry of entries) {
-                    content += await processFileEntry(
-                        childEntry,
-                        path ? `${path}/${entry.name}` : entry.name
-                    );
+                    const content = await processFileEntry(childEntry, entryPath);
+                    combinedContent += content;
+
+                    // Check token limit
+                    if (settings.tokenLimit > 0 && currentTokens >= settings.tokenLimit) {
+                        console.warn('Token limit reached, stopping directory processing');
+                        break;
+                    }
                 }
-                return content;
-            } catch (error) {
-                console.error(`Error processing directory ${entry.name}:`, error);
-                return '';
+
+                return combinedContent;
             }
+
+            return '';
+        } catch (error) {
+            console.error(`Error processing ${entry.name}:`, error);
+            return '';
         }
-        return '';
     };
 
-    // Enhanced copy functionality
     const copyToClipboard = async () => {
         if (!content) return;
 
         try {
             await navigator.clipboard.writeText(content);
             setCopied(true);
+
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
             copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
         } catch (err) {
-            // Fallback
+            console.error('Failed to copy using clipboard API, falling back to execCommand', err);
+
             const textarea = document.createElement('textarea');
             textarea.value = content;
             document.body.appendChild(textarea);
             textarea.select();
             document.execCommand('copy');
             document.body.removeChild(textarea);
+
             setCopied(true);
-            console.error(err);
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
             copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
         }
     };
 
-    // Drop handler
+    // Helper function to estimate token count
+    const estimateTokenCount = (text: string): number => {
+        return Math.ceil(text.length / 4); // Approximate tokens (1 token ≈ 4 chars)
+    };
+
     const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
-        setIsDragging(false);
-        setProcessing(true);
-        setTotalSize(0);
-        setGenerating(true)
+        e.stopPropagation();
 
-        setTimeout(() => {
-            setGenerating(false)
-        }, 3000)
+        // Reset states
+        setIsDragging(false);
+        setContent('');
+        setFileCount(0);
+        setTotalSize(0);
+        setError(null);
+        setCurrentTokens(0);
+
+        // Set processing states
+        setProcessing(true);
+        setGenerating(true);
 
         try {
+            const items = Array.from(e.dataTransfer.items);
+
+            if (items.length === 0) {
+                throw new Error('No files dropped');
+            }
+
             let newContent = '';
             let newFileCount = 0;
+            const entries = items
+                .map(item => item.webkitGetAsEntry())
+                .filter((entry): entry is FileSystemEntry => entry !== null);
 
-            for (const item of e.dataTransfer.items) {
-                const entry = item.webkitGetAsEntry();
-                if (entry) {
-                    const content = await processFileEntry(entry);
-                    if (content) {
-                        newContent += content;
-                        newFileCount++;
-                    }
+            // Process entries
+            for (const entry of entries) {
+                if (currentTokens >= tokenLimit) {
+                    setError(`Token limit (${tokenLimit}) reached. Some files were skipped.`);
+                    break;
+                }
+
+                const content = await processFileEntry(entry);
+                if (content) {
+                    newContent += content;
+                    newFileCount++;
                 }
             }
 
-            if (newFileCount > 0) {
-                setContent(newContent.trim());
-                setFileCount(newFileCount);
+            if (newFileCount === 0) {
+                throw new Error('No valid files found or all files exceeded token limit');
             }
+
+            setContent(newContent.trim());
+            setFileCount(newFileCount);
+
+            // Show warning if we hit the token limit
+            if (currentTokens >= tokenLimit) {
+                setError(`Token limit (${tokenLimit}) reached. Some files were skipped.`);
+            }
+
         } catch (error) {
             console.error('Error processing files:', error);
+            setError(error instanceof Error ? error.message : 'Error processing files');
+            setContent('');
+            setFileCount(0);
+            setTotalSize(0);
+            setCurrentTokens(0);
         } finally {
+            setGenerating(false);
             setProcessing(false);
         }
     };
 
-    return (
-        <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white text-gray-900">
-            <header className="border-b border-gray-200 bg-white/80 backdrop-blur-sm sticky top-0 z-50">
-                <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-                    <a href="/" className="flex hover:scale-105 hover:-rotate-1 transform transition duration-1 cursor-pointer items-center gap-2">
-                        <BotIcon className="w-6 h-6 text-blue-600" />
-                        <span className="font-bold text-xl">SAC</span>
-                        <span className="text-gray-500">by Pinn.co</span>
-                    </a>
-                    <a
-                        href="https://luw.ai/?utm_source=Pinnco"
-                        target="_blank"
-                        rel="noopener"
-                        className="flex hidden md:flex items-center gap-2 text-lg text-blue-600 hover:text-gray-900 transition-colors"
-                    >
-                        <BotIcon className="w-4 h-4" />
-                        <span>Try Our Free AI Suite</span>
-                    </a>
-                    <a
-                        href="https://github.com/emiralp/pinnco/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
-                    >
-                        <Github className="w-4 h-4" />
-                        <span>View on GitHub</span>
-                    </a>
+    // Update the token-aware content display
+    const ContentEditor = () => {
+        const [editableContent, setEditableContent] = useState(content);
+        const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-                </div>
-            </header>
+        // Update token count when content changes
+        useEffect(() => {
+            const count = estimateTokenCount(editableContent);
+            setCurrentTokens(count);
+            setContent(editableContent);
+        }, [editableContent]);
 
-            <main className="max-w-6xl mx-auto px-4 py-16">
-                {!generating ? <>
-                    <div className="text-center mb-12">
-                        <h1 className="text-5xl font-bold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">
-                            Streamlined AI Context
-                        </h1>
-                        <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-                            Transform your codebase into an optimized AI-friendly format.
-                            Seamlessly integrate your entire project context with AI tools like Claude and ChatGPT.
-                        </p>
-                    </div>
-                </> : <>
-                    <div className="text-center mt-6">
-                        <div className="text-xl flex justify-center items-center text-gray-600 max-w-3xl mx-auto">
-                            <div className='animate-spin'>
-                                <Loader />
-                            </div>
+        const getTokenMessage = (): { text: string; isWarning: boolean } => {
+            if (!tokenLimit || tokenLimit === -1) {
+                return {
+                    text: `Total Tokens: ${currentTokens.toLocaleString()}`,
+                    isWarning: false
+                };
+            }
+
+            const exceededBy = currentTokens - tokenLimit;
+            if (exceededBy > 0) {
+                return {
+                    text: `Exceeds limit by ${exceededBy.toLocaleString()} tokens (${currentTokens.toLocaleString()}/${tokenLimit.toLocaleString()})`,
+                    isWarning: true
+                };
+            }
+
+            return {
+                text: `${currentTokens.toLocaleString()} / ${tokenLimit === -1 ? "Unlimited" : tokenLimit.toLocaleString()} tokens`,
+                isWarning: false
+            };
+        };
+
+        const tokenMessage = getTokenMessage();
+
+        return (
+            <div className="space-y-4">
+                <div className="bg-white rounded-xl overflow-hidden border border-gray-200 shadow-lg">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
+                        <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-gray-500" />
+                            <span className="text-sm text-gray-600">
+                                Processed {fileCount} files • {(totalSize / 1024).toFixed(1)}KB
+                            </span>
                         </div>
-                    </div>
-                </>}
-
-                {!generating && !content && <>
-                    <div
-                        className={`
-                        relative rounded-xl border-2 border-dashed p-12 mb-8 transition-all
-                        ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300'}
-                        ${processing ? 'opacity-50' : 'hover:border-blue-500'}
-                        bg-white shadow-lg
-                    `}
-                        onDragOver={(e) => {
-                            e.preventDefault();
-                            setIsDragging(true);
-                        }}
-                        onDragLeave={() => setIsDragging(false)}
-                        onDrop={handleDrop}
-                    >
-                        <div className="flex flex-col items-center justify-center text-center">
-                            <FolderOpen className={`w-16 h-16 mb-4 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`} />
-                            <div className="mb-2 text-2xl font-medium">
-                                Drop Your Project Files
-                            </div>
-                            <div className="text-gray-500">
-                                {processing ? 'Optimizing for AI context...' : 'Supports all major programming languages'}
-                            </div>
-                            {fileCount > 0 && !processing && (
-                                <div className="mt-4 text-sm text-gray-500">
-                                    {fileCount} files processed • {(totalSize / 1024).toFixed(1)}KB
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </>}
-
-
-                {!generating && content && (
-                    <div className="bg-white rounded-xl overflow-hidden border border-gray-200 shadow-lg">
-                        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
-                            <div className="flex items-center gap-2">
-                                <FileText className="w-4 h-4 text-gray-500" />
-                                <span className="text-sm text-gray-600">Streamlined Context</span>
-                            </div>
+                        <div className="flex items-center gap-4">
+                            <span className={`text-sm ${tokenMessage.isWarning ? 'text-amber-600 font-medium' : 'text-gray-600'
+                                }`}>
+                                {tokenMessage.text}
+                            </span>
                             <div className="flex gap-2">
                                 <button
                                     onClick={() => {
+                                        setEditableContent('');
                                         setContent('');
                                         setFileCount(0);
                                         setTotalSize(0);
+                                        setCurrentTokens(0);
+                                        setError(null);
                                     }}
                                     className="p-1.5 text-gray-500 hover:text-red-500 transition-colors"
+                                    aria-label="Clear content"
                                 >
                                     <Trash2 className="w-4 h-4" />
                                 </button>
@@ -288,136 +474,330 @@ const SAC = () => {
                                 </button>
                             </div>
                         </div>
-                        <pre className="p-4 text-sm overflow-x-auto whitespace-pre-wrap break-words text-gray-800">
-                            {content}
-                        </pre>
+                    </div>
+                    <div className="relative">
+                        <textarea
+                            ref={textareaRef}
+                            value={editableContent}
+                            onChange={(e) => setEditableContent(e.target.value)}
+                            className="w-full p-4 text-sm font-mono bg-gray-50 focus:bg-white transition-colors duration-200 focus:outline-none min-h-[300px] max-h-[70vh] overflow-y-auto"
+                            spellCheck={false}
+                            style={{
+                                resize: 'vertical',
+                                lineHeight: '1.5',
+                                tabSize: 2
+                            }}
+                        />
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    // Update settings when token limit changes
+    const handleTokenLimitChange = (value: number) => {
+        const newLimit = value || -1;
+        setTokenLimit(newLimit);
+        updateSettings({ tokenLimit: newLimit });
+    };
+
+    const renderAdvancedSettings = () => (
+        <div className="bg-gray-50 border border-gray-200 rounded-xl p-6 space-y-6 mt-4">
+            <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold">Advanced Settings</h3>
+                <div className="flex gap-2">
+                    <button
+                        onClick={handleResetSettings}
+                        className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                    >
+                        Reset to Default
+                    </button>
+                    <button
+                        onClick={() => setShowAdvanced(!showAdvanced)}
+                        className="text-gray-500 hover:text-gray-700"
+                    >
+                        {showAdvanced ? <ChevronUp /> : <ChevronDown />}
+                    </button>
+                </div>
+            </div>
+            {/* Token Limit */}
+            <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Token Limit
+                </label>
+                <div className="space-y-2">
+                    <input
+                        type="number"
+                        value={tokenLimit}
+                        onChange={(e) => handleTokenLimitChange(parseInt(e.target.value))}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                        placeholder="Enter token limit (-1 for unlimited)"
+                        min="-1"
+                    />
+                    <p className="text-sm text-gray-500">
+                        Set to -1 for unlimited tokens. Current token count: {currentTokens}
+                    </p>
+                </div>
+            </div>
+
+            {/* Code Processing Options */}
+            <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Code Processing
+                </label>
+                <div className="space-y-2">
+                    <label className="flex items-center gap-2">
+                        <input
+                            type="checkbox"
+                            checked={settings.removeComments}
+                            onChange={(e) => updateSettings({
+                                removeComments: e.target.checked
+                            })}
+                            className="rounded border-gray-300"
+                        />
+                        <span>Remove Comments</span>
+                    </label>
+                    <label className="flex items-center gap-2">
+                        <input
+                            type="checkbox"
+                            checked={settings.minifyCode}
+                            onChange={(e) => updateSettings({
+                                minifyCode: e.target.checked
+                            })}
+                            className="rounded border-gray-300"
+                        />
+                        <span>Minify Code</span>
+                    </label>
+                </div>
+            </div>
+
+            {/* Exclude Patterns */}
+            <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Exclude Patterns
+                </label>
+                <div className="space-y-2">
+                    {settings.excludePatterns.map((pattern, index) => (
+                        <div key={index} className="flex items-center gap-2">
+                            <input
+                                type="text"
+                                value={pattern}
+                                readOnly
+                                className="flex-1 px-3 py-2 border border-gray-300 rounded-md bg-gray-50"
+                            />
+                            <button
+                                onClick={() => {
+                                    const newPatterns = settings.excludePatterns.filter((_, i) => i !== index);
+                                    updateSettings({ excludePatterns: newPatterns });
+                                }}
+                                className="p-2 text-red-500 hover:text-red-700"
+                            >
+                                <Minus className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ))}
+                    <div className="flex items-center gap-2">
+                        <input
+                            type="text"
+                            value={newPattern}
+                            onChange={(e) => setNewPattern(e.target.value)}
+                            placeholder="Add new pattern (e.g., /xcache)"
+                            className="flex-1 px-3 py-2 border border-gray-300 rounded-md"
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter' && newPattern) {
+                                    updateSettings({
+                                        excludePatterns: [...settings.excludePatterns, newPattern]
+                                    });
+                                    setNewPattern('');
+                                }
+                            }}
+                        />
+                        <button
+                            onClick={() => {
+                                if (newPattern) {
+                                    updateSettings({
+                                        excludePatterns: [...settings.excludePatterns, newPattern]
+                                    });
+                                    setNewPattern('');
+                                }
+                            }}
+                            className="p-2 text-blue-500 hover:text-blue-700"
+                        >
+                            <Plus className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Allowed File Formats */}
+            <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Allowed File Formats
+                </label>
+                <textarea
+                    value={settings.allowedFormats}
+                    onChange={(e) => updateSettings({
+                        allowedFormats: e.target.value
+                    })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md h-32 font-mono"
+                    placeholder=".js&#10;.py&#10;.rb"
+                />
+                <p className="mt-1 text-sm text-gray-500">
+                    One file extension per line (e.g., .js, .py, .rb)
+                </p>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white text-gray-900">
+            <header className="border-b border-gray-200 bg-white/80 backdrop-blur-sm sticky top-0 z-50">
+                <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
+                    <a href="/" className="flex hover:scale-105 hover:-rotate-1 transform transition duration-1 cursor-pointer items-center gap-2">
+                        <BotIcon className="w-6 h-6 text-blue-600" />
+                        <span className="font-bold text-xl">SAC</span>
+                        <span className="text-gray-500">by Pinn.co</span>
+                    </a>
+                    <div className="flex items-center gap-4">
+                        <a
+                            href="https://luw.ai/?utm_source=Pinnco"
+                            target="_blank"
+                            rel="noopener"
+                            className="hidden md:flex items-center gap-2 text-lg text-blue-600 hover:text-gray-900 transition-colors"
+                        >
+                            <BotIcon className="w-4 h-4" />
+                            <span>Try Our Free AI Suite</span>
+                        </a>
+                        <a
+                            href="https://github.com/emiralp/pinnco/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+                        >
+                            <Github className="w-4 h-4" />
+                            <span>View on GitHub</span>
+                        </a>
+                    </div>
+                </div>
+            </header>
+
+            <main className="max-w-6xl mx-auto px-4 py-16">
+                {/* Hero section - only show when not processing */}
+                {!generating && !processing && (
+                    <div className="text-center mb-12">
+                        <h1 className="text-5xl font-bold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">
+                            Streamlined AI Context
+                        </h1>
+                        <p className="text-xl text-gray-600 max-w-3xl mx-auto">
+                            Transform your codebase into an optimized AI-friendly format.
+                            Seamlessly integrate your entire project context with AI tools like Claude and ChatGPT.
+                        </p>
                     </div>
                 )}
 
-
-                {!content && (
-                    <div className="grid md:grid-cols-3 gap-8 mt-16">
-                        <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
-                            <Shield className="w-8 h-8 mb-4 text-blue-600" />
-                            <h3 className="text-lg font-semibold mb-2">Secure Processing</h3>
-                            <p className="text-gray-600">
-                                All processing happens locally in your browser. Your code never leaves your machine.
-                            </p>
-                        </div>
-                        <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
-                            <Zap className="w-8 h-8 mb-4 text-yellow-500" />
-                            <h3 className="text-lg font-semibold mb-2">Instant Optimization</h3>
-                            <p className="text-gray-600">
-                                Transform your entire codebase into an AI-friendly format in seconds.
-                            </p>
-                        </div>
-                        <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
-                            <Terminal className="w-8 h-8 mb-4 text-green-500" />
-                            <h3 className="text-lg font-semibold mb-2">AI-Enhanced Context</h3>
-                            <p className="text-gray-600">
-                                Optimized output format designed specifically for modern AI tools.
-                            </p>
-                        </div>
-                    </div>
-                )}
-
-<div className="relative mt-16 mb-8">
-                    <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-purple-600 opacity-10 rounded-2xl transform -rotate-1"></div>
-                    <div className="relative bg-gray-900 rounded-2xl p-8 shadow-xl border border-gray-800">
-                        <div className="flex items-center gap-3 mb-6">
-                            <div className="bg-blue-500/20 rounded-full p-2">
-                                <Heart className="w-5 h-5 text-blue-400" />
+                {/* Loading State */}
+                {(generating || processing) && (
+                    <div className="text-center mt-6 py-12">
+                        <div className="flex flex-col justify-center items-center text-gray-600 max-w-3xl mx-auto">
+                            <div className="relative mb-4">
+                                <Loader className="w-8 h-8 text-blue-600 animate-spin" />
                             </div>
-                            <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400">
-                                Why I Built This
-                            </h2>
+                            <span className="text-xl mb-2">Processing your files...</span>
+                            {fileCount > 0 && (
+                                <span className="text-sm text-gray-500">
+                                    Processed {fileCount} files ({(totalSize / 1024).toFixed(1)}KB)
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* Error Message */}
+                {error && !generating && !processing && (
+                    <div className="mb-8 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-center">
+                        {error}
+                    </div>
+                )}
+
+                {/* Content Editor - Replace your existing content display with this */}
+                {!generating && !processing && content && <ContentEditor />}
+
+                {/* Drop Zone and Advanced Settings */}
+                {!generating && !processing && !content && (
+                    <>
+                        <div
+                            className={`
+                            relative rounded-xl border-2 border-dashed p-12 mb-8 transition-all
+                            ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-gray-300'}
+                            bg-white shadow-lg hover:border-blue-500
+                        `}
+                            onDragOver={(e) => {
+                                e.preventDefault();
+                                setIsDragging(true);
+                            }}
+                            onDragLeave={() => setIsDragging(false)}
+                            onDrop={handleDrop}
+                            aria-label="Drop zone for project files"
+                        >
+                            <div className="flex flex-col items-center justify-center text-center">
+                                <FolderOpen
+                                    className={`w-16 h-16 mb-4 ${isDragging ? 'text-blue-500' : 'text-gray-400'}`}
+                                />
+                                <div className="mb-2 text-2xl font-medium">
+                                    Drop Your Project Files
+                                </div>
+                                <div className="text-gray-500">
+                                    Supports all major programming languages
+                                </div>
+                                {fileCount > 0 && (
+                                    <div className="mt-4 text-sm text-gray-500">
+                                        {fileCount} files processed • {(totalSize / 1024).toFixed(1)}KB
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
-                        <div className="space-y-6">
-                            <p className="text-gray-300 leading-relaxed">
-                                When working with AI tools like Claude or ChatGPT, I found myself constantly struggling with
-                                code sharing. Without using specialized IDEs, I had to either upload files separately or
-                                manually merge them.
-                            </p>
+                        <button
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="w-full flex items-center justify-center gap-2 text-gray-600 hover:text-gray-900 p-4 bg-white rounded-xl border border-gray-200 shadow-lg hover:bg-gray-50 transition-colors"
+                            aria-expanded={showAdvanced}
+                        >
+                            <Settings className="w-4 h-4" />
+                            <span>Advanced Settings</span>
+                            <span className="ml-1 text-xs -mt-0.5 font-bold bg-purple-100 text-purple-500 px-1.5 py-0.5 rounded">
+                                New feature!
+                            </span>
+                            {showAdvanced ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        </button>
 
-                            <div className="flex items-center gap-4 p-4 bg-blue-500/10 rounded-xl border border-blue-500/20">
-                                <div className="flex-shrink-0">
-                                    <Sparkles className="w-6 h-6 text-blue-400" />
-                                </div>
-                                <p className="text-blue-200">
-                                    This tool magically transforms your project into AI-pastable content in seconds, and it's completely FREE!
+                        {showAdvanced && renderAdvancedSettings()}
+
+                        {/* Feature Grid */}
+                        <div className="grid md:grid-cols-3 gap-8 mt-16">
+                            <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
+                                <Shield className="w-8 h-8 mb-4 text-blue-600" />
+                                <h3 className="text-lg font-semibold mb-2">Secure Processing</h3>
+                                <p className="text-gray-600">
+                                    All processing happens locally in your browser. Your code never leaves your machine.
                                 </p>
                             </div>
-
-                            <div className="flex items-center gap-3 text-sm text-gray-400">
-                                <BoltIcon className="w-4 h-4" />
-                                <p>Automatically excludes node_modules and cache files for optimal performance</p>
+                            <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
+                                <Zap className="w-8 h-8 mb-4 text-yellow-500" />
+                                <h3 className="text-lg font-semibold mb-2">Instant Optimization</h3>
+                                <p className="text-gray-600">
+                                    Transform your entire codebase into an AI-friendly format in seconds.
+                                </p>
+                            </div>
+                            <div className="p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
+                                <Terminal className="w-8 h-8 mb-4 text-green-500" />
+                                <h3 className="text-lg font-semibold mb-2">AI-Enhanced Context</h3>
+                                <p className="text-gray-600">
+                                    Optimized output format designed specifically for modern AI tools.
+                                </p>
                             </div>
                         </div>
-                    </div>
-                </div>
-
-                {/* AI Tools Banner */}
-                <div className="mt-24 p-6 bg-white rounded-xl border border-gray-200 shadow-lg">
-                    <div className="px-8 py-12 flex flex-col md:flex-row items-center gap-8">
-                        <div className="flex-1 space-y-4">
-                            <div className="flex items-center gap-2">
-                                <div className="bg-purple-500/20 rounded-full p-2">
-                                    <Zap className="w-5 h-5 text-purple-400" />
-                                </div>
-                                <span className="text-sm font-medium text-purple-500">
-                                    Try Our Full AI Collection
-                                </span>
-                            </div>
-                            <h2 className="text-5xl md:text-7xl font-bold">
-                                Transform Your Space with{' '}
-                                <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-purple-600">
-                                    Luw.ai
-                                </span>
-                            </h2>
-                            <p className="text-zinc-400 leading-relaxed max-w-2xl">
-                                Create stunning interior designs & room plans for free with AI. Transform any space - from room layouts
-                                to exterior makeovers. Virtual staging made easy.
-                            </p>
-                            <div className="flex items-center gap-4 pt-2">
-                                <a
-                                    href="https://luw.ai?utm_source=Pinnco"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex font-bold items-center gap-2 px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold transition-colors"
-                                >
-                                    Try Luw.ai for Free!
-                                    <ArrowUpRight className="w-4 h-4" />
-                                </a>
-                                <div className="flex -space-x-2">
-                                    {[
-                                        "https://luvi.imgix.net/luwai-10db78ea2bd139927f8b4f6c2ad1620c/ppl2.jpeg?w=60&h=60&q=50&auto=format",
-                                        "https://luvi.imgix.net/luwai-10db78ea2bd139927f8b4f6c2ad1620c/ppl3.jpeg?w=60&h=60&q=50&auto=format",
-                                        "https://luvi.imgix.net/luwai-10db78ea2bd139927f8b4f6c2ad1620c/ppl1.jpeg?w=60&h=60&q=50&auto=format"
-                                    ].map((oo, i) => (
-                                        <div
-                                            key={i}
-                                            className="w-8 overflow-hidden h-8 rounded-full border-2 border-orange-400 bg-zinc-800"
-                                        >
-                                            <img src={oo} />
-                                        </div>
-                                    ))}
-                                    <div className="w-8 h-8 rounded-full border-2 border-orange-400 bg-purple-700 flex items-center justify-center">
-                                        <span className="text-xs font-bold text-purple-100 mt-0.5">50K+</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex-shrink-0 w-full md:w-72 h-48 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center">
-                            <video poster="https://luvi.imgix.net/Luvi-f766175dd0d728423f52f00ece50aac6/video-capture-luw.png?w=584&amp;h=488&amp;fit=crop&amp;q=50&amp;auto=format" preload="metadata" playsInline={true} autoPlay={true} muted={true} loop={true} className="rounded-2xl shadow-2xl floating">
-                                <source src="https://luvi.imgix.net/luwai-10db78ea2bd139927f8b4f6c2ad1620c/luwvid.mp4" type="video/mp4" />
-                                Your browser does not support the video tag.
-                            </video>
-                        </div>
-                    </div>
-                </div>
-
-                
+                    </>
+                )}
             </main>
 
             <footer className="mt-24 py-12 bg-gray-50 border-t border-gray-200">
