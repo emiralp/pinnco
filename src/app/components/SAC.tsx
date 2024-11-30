@@ -42,7 +42,7 @@ const DEFAULT_SKIP_PATTERNS = [
 ];
 const STORAGE_KEY = 'sac_advanced_settings';
 const DEFAULT_SETTINGS: AdvancedSettings = {
-    tokenLimit: 1500,
+    tokenLimit: 100000,
     excludePatterns: [],
     removeComments: false,
     minifyCode: false,
