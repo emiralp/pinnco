@@ -10,7 +10,8 @@ import {
     ArrowUpRight,
     Save,
     SaveIcon,
-    CheckCheck
+    CheckCheck,
+    X
 } from 'lucide-react';
 import { useState, useRef, useEffect, useCallback } from 'react';
 
@@ -115,7 +116,6 @@ const SAC = () => {
     const [generating, setGenerating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const { settings, updateSettings, setSettings } = useSettings();
-    const [isSaved, setIsSaved] = useState('');
 
     // Advanced settings state
     const [showAdvanced, setShowAdvanced] = useState(false);
@@ -124,7 +124,6 @@ const SAC = () => {
     const [currentTokens, setCurrentTokens] = useState(0);
     const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const [help, setHelp] = useState(false);
 
     // Cleanup effect
     useEffect(() => {
@@ -436,7 +435,7 @@ const SAC = () => {
             progress: { processed: 0, total: 0 }
         });
 
-        const abortControllerRef = useRef(null);
+        const abortControllerRef = useRef<AbortController | null>(null);
 
         // Utility functions for file processing
         const shouldSkipEntry = useCallback((path) => {
@@ -502,7 +501,7 @@ const SAC = () => {
         // API interaction functions
         const fetchRepoContents = async (owner, repo, branch = null, basePath = '') => {
             try {
-                const headers = {
+                const headers: Record<string, string> = {
                     'Accept': 'application/vnd.github.v3+json'
                 };
 
@@ -595,8 +594,13 @@ const SAC = () => {
                         await new Promise(resolve => setTimeout(resolve, 50));
 
                     } catch (error) {
-                        if (error.message === 'Operation cancelled') throw error;
-                        console.warn(`Error processing ${file.path}:`, error);
+                        if (error instanceof Error) {
+                            if (error.message === 'Operation cancelled') throw error;
+                            console.warn(`Error processing ${file.path}:`, error);
+                        } else {
+                            // Handle unknown error types
+                            console.warn(`Unknown error processing ${file.path}:`, error);
+                        }
                     }
                 }
 
@@ -608,9 +612,6 @@ const SAC = () => {
                 };
 
             } catch (error) {
-                if (signal?.aborted) {
-                    throw new Error('Operation cancelled by user');
-                }
                 throw error;
             }
         };
@@ -693,10 +694,17 @@ const SAC = () => {
                 );
                 onProcess(false, result);
             } catch (error) {
-                if (error.message !== 'Operation cancelled by user') {
+                if (error instanceof Error) {
+                    if (error.message !== 'Operation cancelled by user') {
+                        setFormState(prev => ({
+                            ...prev,
+                            error: error.message
+                        }));
+                    }
+                } else {
                     setFormState(prev => ({
                         ...prev,
-                        error: error.message
+                        error: 'An unknown error occurred'
                     }));
                 }
                 onProcess(false);
@@ -739,7 +747,7 @@ const SAC = () => {
                     </div>
                 )}
 
-                <form onSubmit={handleSubmit} className="space-y-4">
+                <form className="space-y-4">
                     <div className="relative">
                         <div className="flex gap-2">
                             <div className="relative flex-1">
@@ -749,7 +757,14 @@ const SAC = () => {
                                 <input
                                     type="text"
                                     value={formState.url}
-                                    onChange={handleUrlChange}
+                                    onChange={(e)=>{
+                                        handleUrlChange(e)
+                                    }}
+                                    onBlur={(e)=>{
+                                        updateSettings({
+                                            githubUrl: e.target.value
+                                        });
+                                    }}
                                     disabled={processing}
                                     className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                     placeholder="Enter GitHub repository URL"
@@ -764,27 +779,15 @@ const SAC = () => {
                                     type="text"
                                     value={formState.token}
                                     onChange={handleTokenChange}
+                                    onBlur={(e)=>{
+                                        updateSettings({
+                                            githubToken: e.target.value
+                                        });
+                                    }}
                                     disabled={processing}
                                     className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                     placeholder="GitHub Personal Access Token (optional)"
                                 />
-                                <button
-                                    type="button"
-                                    onClick={(e) => {
-                                        // Save both URL and token to settings
-                                        updateSettings({
-                                            githubToken: formState.token,
-                                            githubUrl: formState.url
-                                        });
-                                        setIsSaved(true)
-                                        setTimeout(() => {
-                                            setIsSaved(false)
-                                        }, 1000)
-                                    }}
-                                    className="text-md -mt-0.5 font-bold text-green-500 px-1 py-0.5 rounded min-w-[30px] ms-2"
-                                >
-                                    {isSaved ? <CheckCheck /> : <SaveIcon />}
-                                </button>
                                 <button
                                     type="button"
                                     onClick={toggleHelp}
@@ -807,12 +810,13 @@ const SAC = () => {
                                 </button>
                             ) : (
                                 <button
+                                    onClick={(e)=>{
+                                        handleUrlChange(e);
+                                        handleTokenChange(e);
+                                        handleSubmit(e)
+                                    }}
                                     type="submit"
-                                    disabled={!formState.url}
-                                    className={`px-6 py-3 rounded-xl font-medium transition-colors ${!formState.url
-                                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                                        : 'bg-blue-600 text-white hover:bg-blue-700'
-                                        }`}
+                                    className="px-6 py-3 rounded-xl font-medium transition-colors bg-blue-600 text-white hover:bg-blue-700"
                                 >
                                     Process
                                 </button>
@@ -1214,7 +1218,9 @@ const SAC = () => {
                         </div>
 
                         <button
-                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            onClick={() => {
+                                setShowAdvanced(!showAdvanced)
+                            }}
                             className="w-full flex items-center justify-center gap-2 text-gray-600 hover:text-gray-900 p-4 bg-white rounded-xl border border-gray-200 shadow-lg hover:bg-gray-50 transition-colors"
                             aria-expanded={showAdvanced}
                         >
