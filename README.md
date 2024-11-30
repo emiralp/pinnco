@@ -1,5 +1,7 @@
 # Streamlined AI Context (SAC)
 
+[Try it online at Pinn.co!](https://pinn.co)
+
 Transform your codebase into an optimized AI-friendly format. Seamlessly integrate your entire project context with AI tools like Claude and ChatGPT.
 
 ## Why We Built This?
