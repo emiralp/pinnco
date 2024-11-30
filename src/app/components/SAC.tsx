@@ -1,12 +1,18 @@
 "use client";
 
 import {
-    ArrowUpRight, BoltIcon, BotIcon, Check, Copy, FileText,
-    FolderOpen, Github, Heart, Loader, Shield, SparkleIcon,
+    BotIcon, Check, Copy, FileText,
+    FolderOpen, Github, Loader, Shield,
     Sparkles, Terminal, Trash2, Zap, Settings, Plus, Minus,
-    ChevronDown, ChevronUp
+    ChevronDown, ChevronUp,
+    KeyRound,
+    Info,
+    ArrowUpRight,
+    Save,
+    SaveIcon,
+    CheckCheck
 } from 'lucide-react';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 
 // Type definitions
 interface AdvancedSettings {
@@ -15,6 +21,15 @@ interface AdvancedSettings {
     removeComments: boolean;
     minifyCode: boolean;
     allowedFormats: string;
+    githubToken: string;
+    githubUrl: string;
+}
+
+interface GitHubInputProps {
+    onProcess: (processing: boolean, result?: any) => void;
+    processing: boolean;
+    settings: AdvancedSettings;
+    updateSettings: (updates: Partial<AdvancedSettings>) => void;
 }
 
 // Constants
@@ -33,34 +48,45 @@ const DEFAULT_SETTINGS: AdvancedSettings = {
     excludePatterns: [],
     removeComments: false,
     minifyCode: false,
-    allowedFormats: DEFAULT_ACCEPTED_TYPES.join('\n')
+    allowedFormats: DEFAULT_ACCEPTED_TYPES.join('\n'),
+    githubToken: '',
+    githubUrl: ''
 };
 
 // Settings management hook
 const useSettings = () => {
-    // Initialize settings from localStorage
-    const [settings, setSettings] = useState<AdvancedSettings>(() => {
-        if (typeof window === 'undefined') return DEFAULT_SETTINGS;
+    // Initialize settings with default first
+    const [settings, setSettings] = useState<AdvancedSettings>(DEFAULT_SETTINGS);
 
+    // Create the updateSettings function
+    const updateSettings = useCallback((updates: Partial<AdvancedSettings>) => {
+        setSettings(current => ({
+            ...current,
+            ...updates
+        }));
+    }, []);
+
+    // Then update from localStorage in useEffect
+    useEffect(() => {
         try {
             const saved = localStorage.getItem(STORAGE_KEY);
-            if (!saved) return DEFAULT_SETTINGS;
-
-            const parsed = JSON.parse(saved);
-
-            // Ensure all properties exist with proper types
-            return {
-                tokenLimit: Number(parsed.tokenLimit) || DEFAULT_SETTINGS.tokenLimit,
-                excludePatterns: Array.isArray(parsed.excludePatterns) ? parsed.excludePatterns : DEFAULT_SETTINGS.excludePatterns,
-                removeComments: Boolean(parsed.removeComments),
-                minifyCode: Boolean(parsed.minifyCode),
-                allowedFormats: typeof parsed.allowedFormats === 'string' ? parsed.allowedFormats : DEFAULT_SETTINGS.allowedFormats
-            };
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                // Ensure all properties exist with proper types
+                setSettings({
+                    tokenLimit: Number(parsed.tokenLimit) || DEFAULT_SETTINGS.tokenLimit,
+                    excludePatterns: Array.isArray(parsed.excludePatterns) ? parsed.excludePatterns : DEFAULT_SETTINGS.excludePatterns,
+                    removeComments: Boolean(parsed.removeComments),
+                    minifyCode: Boolean(parsed.minifyCode),
+                    allowedFormats: typeof parsed.allowedFormats === 'string' ? parsed.allowedFormats : DEFAULT_SETTINGS.allowedFormats,
+                    githubToken: String(parsed.githubToken) || DEFAULT_SETTINGS.githubToken,
+                    githubUrl: String(parsed.githubUrl) || DEFAULT_SETTINGS.githubUrl
+                });
+            }
         } catch (error) {
             console.error('Error loading settings:', error);
-            return DEFAULT_SETTINGS;
         }
-    });
+    }, []);
 
     // Save settings to localStorage whenever they change
     useEffect(() => {
@@ -71,15 +97,11 @@ const useSettings = () => {
         }
     }, [settings]);
 
-    // Update individual settings
-    const updateSettings = (updates: Partial<AdvancedSettings>) => {
-        setSettings(current => ({
-            ...current,
-            ...updates
-        }));
+    return {
+        settings,
+        setSettings,
+        updateSettings
     };
-
-    return { settings, updateSettings, setSettings };
 };
 
 const SAC = () => {
@@ -93,6 +115,7 @@ const SAC = () => {
     const [generating, setGenerating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const { settings, updateSettings, setSettings } = useSettings();
+    const [isSaved, setIsSaved] = useState('');
 
     // Advanced settings state
     const [showAdvanced, setShowAdvanced] = useState(false);
@@ -101,6 +124,7 @@ const SAC = () => {
     const [currentTokens, setCurrentTokens] = useState(0);
     const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const processingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [help, setHelp] = useState(false);
 
     // Cleanup effect
     useEffect(() => {
@@ -148,7 +172,7 @@ const SAC = () => {
     }, [processing, generating]);
 
     // Utility functions
-    const handleGitHubProcess = (processing, result = {content:"", fileCount: 0, totalSize: 0, tokenCount: 0}) => {
+    const handleGitHubProcess = (processing, result = { content: "", fileCount: 0, totalSize: 0, tokenCount: 0 }) => {
         setProcessing(processing);
         setGenerating(processing);
 
@@ -402,42 +426,97 @@ const SAC = () => {
         }
     };
 
-    const GitHubInput = ({ onProcess, processing, settings }) => {
-        const [url, setUrl] = useState('');
-        const [error, setError] = useState('');
-        const [progress, setProgress] = useState({ processed: 0, total: 0 });
+    const GitHubInput: React.FC<GitHubInputProps> = ({ onProcess, processing, settings, updateSettings }) => {
+        // Form state management
+        const [formState, setFormState] = useState({
+            url: settings.githubUrl || '',
+            token: settings.githubToken || '',
+            help: false,
+            error: '',
+            progress: { processed: 0, total: 0 }
+        });
+
         const abortControllerRef = useRef(null);
 
-        const validateGitHubUrl = (url) => {
-            const githubRegex = /^https:\/\/github\.com\/[\w-]+\/[\w.-]+(?:\/tree\/[^/]+(?:\/[\w.-]+)*)?$/;
-            return githubRegex.test(url);
-        };
+        // Utility functions for file processing
+        const shouldSkipEntry = useCallback((path) => {
+            const normalizedPath = path.toLowerCase();
 
-        const extractRepoInfo = (url) => {
-            const match = url.match(/github\.com\/([\w-]+)\/([\w.-]+)(?:\/tree\/([^/]+)(?:\/(.+))?)?/);
-            return match ? {
-                owner: match[1],
-                repo: match[2],
-                branch: match[3] || null,
-                path: match[4] || ''
-            } : null;
-        };
+            // Combine default and user patterns
+            const allPatterns = [
+                // Default patterns
+                'node_modules', 'vendor', 'dist', 'build', '.git',
+                '__pycache__', 'venv', '.env', 'coverage', 'tmp',
+                // User-defined patterns
+                ...(settings.excludePatterns || [])
+            ].map(pattern => pattern.toLowerCase().trim())
+                .filter(Boolean);
 
+            return allPatterns.some(pattern => {
+                const regexPattern = pattern
+                    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                    .replace(/\*/g, '.*')
+                    .replace(/\?/g, '.');
+                return new RegExp(regexPattern).test(normalizedPath);
+            });
+        }, [settings.excludePatterns]);
+
+        const isAllowedFileType = useCallback((filename) => {
+            const extension = '.' + filename.split('.').pop()?.toLowerCase();
+            if (!extension) return false;
+
+            const allowedTypes = settings.allowedFormats
+                .split('\n')
+                .map(type => type.trim().toLowerCase())
+                .filter(Boolean);
+
+            // If no allowed types are specified, accept all files
+            if (allowedTypes.length === 0) return true;
+
+            return allowedTypes.includes(extension);
+        }, [settings.allowedFormats]);
+
+        // Process content based on settings
+        const processFileContent = useCallback((content) => {
+            let processedContent = content;
+
+            if (settings.removeComments) {
+                processedContent = processedContent
+                    .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1') // Remove C-style comments
+                    .replace(/^\s*#.*$/gm, '')                           // Remove shell/python style comments
+                    .replace(/^\s*--.*$/gm, '')                         // Remove SQL style comments
+                    .replace(/^\s*\n/gm, '')                           // Remove empty lines
+                    .trim();
+            }
+
+            if (settings.minifyCode) {
+                processedContent = processedContent
+                    .replace(/\s+/g, ' ')
+                    .replace(/\n/g, '')
+                    .trim();
+            }
+
+            return processedContent;
+        }, [settings.removeComments, settings.minifyCode]);
+
+        // API interaction functions
         const fetchRepoContents = async (owner, repo, branch = null, basePath = '') => {
             try {
-                // Initialize abort controller
+                const headers = {
+                    'Accept': 'application/vnd.github.v3+json'
+                };
+
+                if (formState.token) {
+                    headers.Authorization = `token ${formState.token}`;
+                }
+
                 abortControllerRef.current = new AbortController();
                 const { signal } = abortControllerRef.current;
 
-                // Get repository metadata
+                // Fetch repository metadata
                 const repoResponse = await fetch(
                     `https://api.github.com/repos/${owner}/${repo}`,
-                    {
-                        headers: {
-                            'Accept': 'application/vnd.github.v3+json'
-                        },
-                        signal
-                    }
+                    { headers, signal }
                 );
 
                 if (!repoResponse.ok) {
@@ -450,12 +529,7 @@ const SAC = () => {
                 // Fetch the tree
                 const treeResponse = await fetch(
                     `https://api.github.com/repos/${owner}/${repo}/git/trees/${targetBranch}?recursive=1`,
-                    {
-                        headers: {
-                            'Accept': 'application/vnd.github.v3+json'
-                        },
-                        signal
-                    }
+                    { headers, signal }
                 );
 
                 if (!treeResponse.ok) {
@@ -464,39 +538,17 @@ const SAC = () => {
 
                 const treeData = await treeResponse.json();
 
-                // Filter files based on settings
+                // Filter and process files
                 const files = treeData.tree
                     .filter(item => item.type === 'blob')
                     .filter(item => !basePath || item.path.startsWith(basePath))
-                    .filter(item => {
-                        // Check file extension
-                        const extension = '.' + item.path.split('.').pop().toLowerCase();
-                        const allowedTypes = settings.allowedFormats
-                            .split('\n')
-                            .map(type => type.trim().toLowerCase())
-                            .filter(Boolean);
+                    .filter(item => !shouldSkipEntry(item.path))
+                    .filter(item => isAllowedFileType(item.path));
 
-                        if (allowedTypes.length === 0) return true;
-                        return allowedTypes.includes(extension);
-                    })
-                    .filter(item => {
-                        // Check exclude patterns
-                        const allPatterns = [
-                            ...DEFAULT_SKIP_PATTERNS,
-                            ...settings.excludePatterns
-                        ].map(pattern => pattern.toLowerCase().trim())
-                            .filter(Boolean);
-
-                        return !allPatterns.some(pattern => {
-                            const regexPattern = pattern
-                                .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-                                .replace(/\*/g, '.*')
-                                .replace(/\?/g, '.');
-                            return new RegExp(regexPattern).test(item.path.toLowerCase());
-                        });
-                    });
-
-                setProgress({ processed: 0, total: files.length });
+                setFormState(prev => ({
+                    ...prev,
+                    progress: { processed: 0, total: files.length }
+                }));
 
                 let combinedContent = '';
                 let processedFiles = 0;
@@ -511,12 +563,7 @@ const SAC = () => {
                     try {
                         const contentResponse = await fetch(
                             `https://api.github.com/repos/${owner}/${repo}/contents/${file.path}?ref=${targetBranch}`,
-                            {
-                                headers: {
-                                    'Accept': 'application/vnd.github.v3+json'
-                                },
-                                signal
-                            }
+                            { headers, signal }
                         );
 
                         if (!contentResponse.ok) continue;
@@ -525,21 +572,7 @@ const SAC = () => {
                         let content = atob(contentData.content);
 
                         // Apply processing based on settings
-                        if (settings.removeComments) {
-                            content = content
-                                .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1')
-                                .replace(/^\s*#.*$/gm, '')
-                                .replace(/^\s*--.*$/gm, '')
-                                .replace(/^\s*\n/gm, '')
-                                .trim();
-                        }
-
-                        if (settings.minifyCode) {
-                            content = content
-                                .replace(/\s+/g, ' ')
-                                .replace(/\n/g, '')
-                                .trim();
-                        }
+                        content = processFileContent(content);
 
                         // Check token limit
                         const contentTokens = Math.ceil(content.length / 4);
@@ -553,7 +586,10 @@ const SAC = () => {
                         totalSize += content.length;
                         currentTokens += contentTokens;
 
-                        setProgress({ processed: processedFiles, total: files.length });
+                        setFormState(prev => ({
+                            ...prev,
+                            progress: { processed: processedFiles, total: files.length }
+                        }));
 
                         // Add small delay to avoid rate limits
                         await new Promise(resolve => setTimeout(resolve, 50));
@@ -576,24 +612,74 @@ const SAC = () => {
                     throw new Error('Operation cancelled by user');
                 }
                 throw error;
-            } finally {
-                abortControllerRef.current = null;
             }
         };
 
-        const handleSubmit = async (e) => {
+        // Input handlers
+        const handleUrlChange = useCallback((e) => {
             e.preventDefault();
-            setError('');
-            setProgress({ processed: 0, total: 0 });
+            setFormState(prev => ({
+                ...prev,
+                url: e.target.value
+            }));
+        }, []);
 
-            if (!validateGitHubUrl(url)) {
-                setError('Please enter a valid GitHub repository URL');
+        const handleTokenChange = useCallback((e) => {
+            e.preventDefault();
+            setFormState(prev => ({
+                ...prev,
+                token: e.target.value
+            }));
+        }, []);
+
+        const toggleHelp = useCallback((e) => {
+            e.preventDefault();
+            setFormState(prev => ({
+                ...prev,
+                help: !prev.help
+            }));
+        }, []);
+
+        // Validation
+        const validateGitHubUrl = useCallback((url) => {
+            const githubRegex = /^https:\/\/github\.com\/[\w-]+\/[\w.-]+(?:\/tree\/[^/]+(?:\/[\w.-]+)*)?$/;
+            return githubRegex.test(url);
+        }, []);
+
+        const extractRepoInfo = useCallback((url) => {
+            const match = url.match(/github\.com\/([\w-]+)\/([\w.-]+)(?:\/tree\/([^/]+)(?:\/(.+))?)?/);
+            return match ? {
+                owner: match[1],
+                repo: match[2],
+                branch: match[3] || null,
+                path: match[4] || ''
+            } : null;
+        }, []);
+
+        // Form submission
+        const handleSubmit = useCallback(async (e) => {
+            e.preventDefault();
+
+            setFormState(prev => ({
+                ...prev,
+                error: '',
+                progress: { processed: 0, total: 0 }
+            }));
+
+            if (!validateGitHubUrl(formState.url)) {
+                setFormState(prev => ({
+                    ...prev,
+                    error: 'Please enter a valid GitHub repository URL'
+                }));
                 return;
             }
 
-            const repoInfo = extractRepoInfo(url);
+            const repoInfo = extractRepoInfo(formState.url);
             if (!repoInfo) {
-                setError('Invalid GitHub repository URL format');
+                setFormState(prev => ({
+                    ...prev,
+                    error: 'Invalid GitHub repository URL format'
+                }));
                 return;
             }
 
@@ -606,26 +692,53 @@ const SAC = () => {
                     repoInfo.path
                 );
                 onProcess(false, result);
-                setUrl('');
             } catch (error) {
                 if (error.message !== 'Operation cancelled by user') {
-                    setError(error.message);
+                    setFormState(prev => ({
+                        ...prev,
+                        error: error.message
+                    }));
                 }
                 onProcess(false);
             }
-        };
+        }, [formState.url, formState.token, onProcess, validateGitHubUrl, extractRepoInfo, fetchRepoContents]);
 
-        const handleCancel = () => {
+        // Cancel operation
+        const handleCancel = useCallback(() => {
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
                 abortControllerRef.current = null;
                 onProcess(false);
-                setProgress({ processed: 0, total: 0 });
+                setFormState(prev => ({
+                    ...prev,
+                    progress: { processed: 0, total: 0 }
+                }));
             }
-        };
+        }, [onProcess]);
 
+        // Component render
         return (
             <div className="mb-8">
+                {formState.help && (
+                    <div className="flex items-start gap-2 my-3">
+                        <div className="flex-1 p-4 bg-purple-100 rounded-xl">
+                            <h4 className="text-lg text-purple-600">GitHub Personal Access Token</h4>
+                            <p className="text-sm text-purple-900 mt-1">
+                                Optional token for private repositories and/or increased API rate limits
+                            </p>
+                            <a
+                                href="https://github.com/settings/tokens/new?description=sac&scopes=repo"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-purple-700 bg-white mt-5 hover:bg-purple-200 rounded-lg transition-colors"
+                            >
+                                Generate Token
+                                <ArrowUpRight className="w-4 h-4 ml-1" />
+                            </a>
+                        </div>
+                    </div>
+                )}
+
                 <form onSubmit={handleSubmit} className="space-y-4">
                     <div className="relative">
                         <div className="flex gap-2">
@@ -635,13 +748,52 @@ const SAC = () => {
                                 </div>
                                 <input
                                     type="text"
-                                    value={url}
-                                    onChange={(e) => setUrl(e.target.value)}
+                                    value={formState.url}
+                                    onChange={handleUrlChange}
                                     disabled={processing}
                                     className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                    placeholder="Enter GitHub repository URL or directory path"
+                                    placeholder="Enter GitHub repository URL"
                                 />
                             </div>
+
+                            <div className="relative flex-1 flex">
+                                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <Github className="h-5 w-5 text-gray-400" />
+                                </div>
+                                <input
+                                    type="text"
+                                    value={formState.token}
+                                    onChange={handleTokenChange}
+                                    disabled={processing}
+                                    className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="GitHub Personal Access Token (optional)"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        // Save both URL and token to settings
+                                        updateSettings({
+                                            githubToken: formState.token,
+                                            githubUrl: formState.url
+                                        });
+                                        setIsSaved(true)
+                                        setTimeout(() => {
+                                            setIsSaved(false)
+                                        }, 1000)
+                                    }}
+                                    className="text-md -mt-0.5 font-bold text-green-500 px-1 py-0.5 rounded min-w-[30px] ms-2"
+                                >
+                                    {isSaved ? <CheckCheck /> : <SaveIcon />}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={toggleHelp}
+                                    className="text-md -mt-0.5 font-bold text-purple-500 px-1 py-0.5 rounded min-w-[30px]"
+                                >
+                                    <Info />
+                                </button>
+                            </div>
+
                             {processing ? (
                                 <button
                                     type="button"
@@ -656,25 +808,27 @@ const SAC = () => {
                             ) : (
                                 <button
                                     type="submit"
-                                    disabled={!url}
-                                    className={`px-6 py-3 rounded-xl font-medium transition-colors
-                                        ${!url ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                                            : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                    disabled={!formState.url}
+                                    className={`px-6 py-3 rounded-xl font-medium transition-colors ${!formState.url
+                                        ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                                        }`}
                                 >
                                     Process
                                 </button>
                             )}
                         </div>
                     </div>
-                    {error && (
+
+                    {formState.error && (
                         <div className="text-red-600 text-sm mt-2">
-                            {error}
+                            {formState.error}
                         </div>
                     )}
-                    {processing && progress.total > 0 && (
+                    {processing && formState.progress.total > 0 && (
                         <div className="flex items-center gap-2 text-sm text-gray-600">
                             <Loader className="w-4 h-4 animate-spin" />
-                            <span>Processing files: {progress.processed}/{progress.total}</span>
+                            <span>Processing files: {formState.progress.processed}/{formState.progress.total}</span>
                         </div>
                     )}
                 </form>
@@ -977,7 +1131,7 @@ const SAC = () => {
                 {/* Hero section - only show when not processing */}
                 {!generating && !processing && (
                     <div className="text-center mb-12">
-                        <h1 className="text-5xl font-bold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">
+                        <h1 className="text-6xl max-w-3xl mx-auto font-bold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600">
                             Streamlined AI Context
                         </h1>
                         <p className="text-xl text-gray-600 max-w-3xl mx-auto">
@@ -1055,6 +1209,7 @@ const SAC = () => {
                                 onProcess={handleGitHubProcess}
                                 processing={processing || generating}
                                 settings={settings}
+                                updateSettings={updateSettings}
                             />
                         </div>
 
